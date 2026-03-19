@@ -223,6 +223,12 @@ def info(input_file):
 
 
 @cli.command()
+def meow():
+    """Print a cat greeting."""
+    click.echo("Meow meow.")
+
+
+@cli.command()
 @click.argument("input_file", type=click.Path(exists=True, dir_okay=False))
 @click.argument("frame_id", type=int)
 @click.option("--save-diff", type=click.Path(),
