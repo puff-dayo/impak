@@ -11,8 +11,8 @@ def natural_sort_key(path: Path) -> list:
 paths = sorted(Path("Ganyu X Slime/").glob("*.png"), key=natural_sort_key)
 
 
-# A fast and straight forward, automatic method. The default method.
-# Possibly produces a smallest file, but it really depends.
+# A slow, automatic method. The default method.
+# Possibly produces a smallest impak file, but it really depends.
 with impak.create("Ganyu X Slime_lto.impak",
                   mode="lto", codec="webp", quality=95
                   ) as pack:
@@ -20,7 +20,8 @@ with impak.create("Ganyu X Slime_lto.impak",
         pack.add(path, name=path.stem)
 
 
-# Another automatic method.
+# A fast and straight forward, automatic method.
+# Results in a slightly larger impak file.
 with impak.create("Ganyu X Slime_prior.impak",
                   mode="vs_prior", codec="webp", quality=95
                   ) as pack:
