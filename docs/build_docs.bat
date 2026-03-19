@@ -1,0 +1,1 @@
+pdoc ../src/impak -o ./ -d numpy
