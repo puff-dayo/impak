@@ -134,9 +134,22 @@ class ImpakReader:
             + (f"  ({self._baseline_count} hidden baseline(s))" if self._baseline_count else ""),
             f"Size    : {total_bytes:,} bytes ({total_bytes/1024:.1f} KB)",
             "",
-            f"{'ID':>4}  {'Type':>9}  {'Ref':>4}  {'Patches':>7}  {'Bytes':>9}  Name",
-            "─" * 64,
         ]
+
+        frame_sizes = {self._frame_size(self._content_to_abs(i)) for i in range(n_content)}
+        mixed_sizes = len(frame_sizes) > 1
+
+        if mixed_sizes:
+            lines += [
+                f"{'ID':>4}  {'Type':>9}  {'Ref':>4}  {'Patches':>7}  {'Bytes':>9}  {'Size':>11}  Name",
+                "─" * 72,
+            ]
+        else:
+            lines += [
+                f"{'ID':>4}  {'Type':>9}  {'Ref':>4}  {'Patches':>7}  {'Bytes':>9}  Name",
+                "─" * 64,
+            ]
+
         for content_id in range(n_content):
             abs_id = self._content_to_abs(content_id)
             entry = self._index[abs_id]
@@ -152,10 +165,18 @@ class ImpakReader:
             data_bytes = self._frame_data_size(abs_id)
             meta = self._read_metadata(abs_id)
             name = meta.get("name", "")
-            lines.append(
-                f"{content_id:>4}  {ftype:>9}  {ref:>4}  "
-                f"{entry['patch_count']:>7}  {data_bytes:>9,}  {name}"
-            )
+            if mixed_sizes:
+                fw, fh = self._frame_size(abs_id)
+                size_str = f"{fw}×{fh}"
+                lines.append(
+                    f"{content_id:>4}  {ftype:>9}  {ref:>4}  "
+                    f"{entry['patch_count']:>7}  {data_bytes:>9,}  {size_str:>11}  {name}"
+                )
+            else:
+                lines.append(
+                    f"{content_id:>4}  {ftype:>9}  {ref:>4}  "
+                    f"{entry['patch_count']:>7}  {data_bytes:>9,}  {name}"
+                )
         return "\n".join(lines)
 
     def diff_map(self, frame_id: int) -> list[tuple[int, int, int, int]]:
@@ -166,13 +187,14 @@ class ImpakReader:
         abs_id = self._content_to_abs(frame_id)
         entry = self._index[abs_id]
         if entry["frame_type"] == FRAME_KEYFRAME:
-            return [(0, 0, self._header["width"], self._header["height"])]
+            w, h = self._frame_size(abs_id)
+            return [(0, 0, w, h)]
         patches = self._read_patches(abs_id)
         return [(x, y, w, h) for (x, y, w, h, _) in patches]
 
     @property
     def canvas_size(self) -> tuple[int, int]:
-        return (self._header["width"], self._header["height"])
+        return self._header["width"], self._header["height"]
 
     @property
     def mode(self) -> str:
@@ -182,6 +204,19 @@ class ImpakReader:
     def baseline_count(self) -> int:
         """Number of hidden baseline frames (0 for non-manual files)."""
         return self._baseline_count
+
+    def _frame_size(self, abs_id: int) -> tuple[int, int]:
+        """
+        Return (width, height) for a frame.
+
+        For files written with multi-size support the per-frame size is stored
+        in JSON metadata under "_size".  For older single-size files (or frames
+        that pre-date the feature) we fall back to the global canvas dimensions.
+        """
+        meta = self._read_metadata(abs_id)
+        if "_size" in meta:
+            return tuple(meta["_size"])
+        return self._header["width"], self._header["height"]
 
     def _content_to_abs(self, content_id: int) -> int:
         """Convert a public content index to an absolute frame index."""

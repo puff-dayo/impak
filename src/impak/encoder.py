@@ -151,7 +151,9 @@ class ImpakWriter:
         self._ref_arrays: list[np.ndarray] = []
         self._depths: list[int] = []
 
+
         self._canvas: Optional[tuple[int, int]] = None
+        self._size_groups: dict[tuple[int, int], list[int]] = {}
         self._closed = False
 
         self._baseline_ids: list[int] = []
@@ -185,11 +187,6 @@ class ImpakWriter:
 
         if self._canvas is None:
             self._canvas = (image.width, image.height)
-        elif (image.width, image.height) != self._canvas:
-            raise ValueError(
-                f"Frame {len(self._frames)}: image size {image.size} does not "
-                f"match canvas {self._canvas}"
-            )
 
         if self._pending_baselines:
             self._inject_baselines(self._pending_baselines)
@@ -204,6 +201,8 @@ class ImpakWriter:
             meta["name"] = name
         if metadata:
             meta.update(metadata)
+
+        meta["_size"] = [image.width, image.height]
         meta_bytes = json.dumps(meta, separators=(",", ":")).encode() if meta else b""
 
         parts: list[bytes] = []
@@ -227,6 +226,8 @@ class ImpakWriter:
         self._frame_data.append(frame_bytes)
         self._ref_images.append(image)
         self._ref_arrays.append(np.array(image, dtype=np.int16))
+        size_key = (image.width, image.height)
+        self._size_groups.setdefault(size_key, []).append(frame_id)
 
         return frame_id - self._baseline_count
 
@@ -362,6 +363,12 @@ class ImpakWriter:
 
     def _encode_frame(self, image: Image.Image, frame_id: int):
         """Route to the appropriate encoder. Returns (frame_type, ref_id, patches)."""
+        size_key = (image.width, image.height)
+        same_size_ids = [fid for fid in self._size_groups.get(size_key, [])
+                         if fid < frame_id]
+        if not same_size_ids and frame_id > 0:
+            return self._make_keyframe(image, frame_id)
+
         if self.mode_id == MODE_MANUAL:
             return self._encode_frame_manual(image, frame_id)
 
@@ -369,17 +376,17 @@ class ImpakWriter:
             return self._make_keyframe(image, frame_id)
 
         if self.mode_id == MODE_LTO:
-            return self._encode_frame_lto(image, frame_id)
+            return self._encode_frame_lto(image, frame_id, same_size_ids)
 
         if self.mode_id == MODE_KEYFRAME and (frame_id % self.keyframe_interval == 0):
             return self._make_keyframe(image, frame_id)
 
         if self.mode_id == MODE_VS_FIRST:
-            ref_id = 0
+            ref_id = same_size_ids[0]
         elif self.mode_id == MODE_VS_PRIOR:
-            ref_id = frame_id - 1
+            ref_id = same_size_ids[-1]
         else:
-            ref_id = frame_id - 1
+            ref_id = same_size_ids[-1]
 
         return self._diff_against(image, frame_id, ref_id)
 
@@ -411,12 +418,18 @@ class ImpakWriter:
         )
         return FRAME_DELTA, ref_id, patches
 
-    def _encode_frame_lto(self, image: Image.Image, frame_id: int):
+    def _encode_frame_lto(self, image: Image.Image, frame_id: int,
+                           same_size_ids: Optional[list] = None):
         new_arr = np.array(image, dtype=np.int16)
         total_px = new_arr.shape[0] * new_arr.shape[1]
 
+        if same_size_ids is None:
+            size_key = (image.width, image.height)
+            same_size_ids = [fid for fid in self._size_groups.get(size_key, [])
+                             if fid < frame_id]
+
         eligible = [
-            cid for cid in range(frame_id)
+            cid for cid in same_size_ids
             if self._depths[cid] + 1 <= self.max_ref_depth
         ]
         if not eligible:
