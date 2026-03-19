@@ -20,7 +20,7 @@ dependencies = [
 impak = "impak.cli:cli"
 
 [project.urls]
-Homepage = "https://github.com/puff-dayo/impak"
+Homepage = "https://puff-dayo.github.io/impak/impak.html"
 Repository = "https://github.com/puff-dayo/impak"
 
 [tool.setuptools.packages.find]
