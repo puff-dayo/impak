@@ -80,14 +80,13 @@ def compute_patches(
     codec: str = "png",
     quality: int = 100,
     workers: Optional[int] = None,
+    ref_arr: Optional[np.ndarray] = None,
+    new_arr: Optional[np.ndarray] = None,
 ) -> List[Patch]:
     """
     Compare *new_img* against *ref_img* using a tile grid.
-
     Parameters
     ----------
-    ref_img    : PIL Image – reference (what we're diffing against)
-    new_img    : PIL Image – the new frame
     threshold  : per-channel absolute pixel delta that counts as "changed"
                  (use 0 for perfectly lossless; 3-6 absorbs JPEG noise)
     tile_size  : grid cell size in pixels (smaller = finer granularity but
@@ -98,13 +97,20 @@ def compute_patches(
                  None = use ThreadPoolExecutor default (cpu_count × 4 or so).
                  Set to 1 to disable parallelism entirely.
 
-    Returns
-    -------
-    List of (x, y, w, h, compressed_bytes) tuples.
-    Empty list if the images are identical within threshold.
     """
-    ref = np.array(ref_img.convert("RGBA"), dtype=np.int16)
-    new = np.array(new_img.convert("RGBA"), dtype=np.int16)
+    if ref_arr is None:
+        ref = np.array(ref_img.convert("RGBA"), dtype=np.int16)
+    else:
+        ref = ref_arr
+        if ref.dtype != np.int16:
+            ref = ref.astype(np.int16, copy=False)
+
+    if new_arr is None:
+        new = np.array(new_img.convert("RGBA"), dtype=np.int16)
+    else:
+        new = new_arr
+        if new.dtype != np.int16:
+            new = new.astype(np.int16, copy=False)
 
     if ref.shape != new.shape:
         raise ValueError(
@@ -153,7 +159,6 @@ def compute_patches(
             patches = list(pool.map(_compress_rect, merged))
 
     return patches
-
 
 def _tiles_to_rects(tiles, tile_size, img_w, img_h):
     """Convert (tile_row, tile_col) list to pixel (x, y, w, h) tuples."""

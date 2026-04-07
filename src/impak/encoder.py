@@ -184,6 +184,7 @@ class ImpakWriter:
             image = Image.open(image)
 
         image = image.convert("RGBA")
+        new_arr = np.array(image, dtype=np.int16)
 
         if self._canvas is None:
             self._canvas = (image.width, image.height)
@@ -194,7 +195,7 @@ class ImpakWriter:
 
         frame_id = len(self._frames)
 
-        frame_type, ref_id, patches = self._encode_frame(image, frame_id)
+        frame_type, ref_id, patches = self._encode_frame(image, frame_id, new_arr)
 
         meta: dict = {}
         if name:
@@ -225,7 +226,7 @@ class ImpakWriter:
         })
         self._frame_data.append(frame_bytes)
         self._ref_images.append(image)
-        self._ref_arrays.append(np.array(image, dtype=np.int16))
+        self._ref_arrays.append(new_arr)
         size_key = (image.width, image.height)
         self._size_groups.setdefault(size_key, []).append(frame_id)
 
@@ -361,7 +362,7 @@ class ImpakWriter:
 
         self._baseline_count = len(self._baseline_ids)
 
-    def _encode_frame(self, image: Image.Image, frame_id: int):
+    def _encode_frame(self, image: Image.Image, frame_id: int, new_arr: np.ndarray):
         """Route to the appropriate encoder. Returns (frame_type, ref_id, patches)."""
         size_key = (image.width, image.height)
         same_size_ids = [fid for fid in self._size_groups.get(size_key, [])
@@ -370,13 +371,13 @@ class ImpakWriter:
             return self._make_keyframe(image, frame_id)
 
         if self.mode_id == MODE_MANUAL:
-            return self._encode_frame_manual(image, frame_id)
+            return self._encode_frame_manual(image, frame_id, new_arr)
 
         if frame_id == 0:
             return self._make_keyframe(image, frame_id)
 
         if self.mode_id == MODE_LTO:
-            return self._encode_frame_lto(image, frame_id, same_size_ids)
+            return self._encode_frame_lto(image, frame_id, new_arr, same_size_ids)
 
         if self.mode_id == MODE_KEYFRAME and (frame_id % self.keyframe_interval == 0):
             return self._make_keyframe(image, frame_id)
@@ -388,7 +389,7 @@ class ImpakWriter:
         else:
             ref_id = same_size_ids[-1]
 
-        return self._diff_against(image, frame_id, ref_id)
+        return self._diff_against(image, frame_id, ref_id, new_arr)
 
     def _ref_chain_depth(self, frame_id: int) -> int:
         return self._depths[frame_id]
@@ -398,10 +399,9 @@ class ImpakWriter:
         compressed = _encode_crop(image, 0, 0, w, h, codec=self.codec, quality=self.quality)
         return FRAME_KEYFRAME, frame_id, [(0, 0, w, h, compressed)]
 
-    def _diff_against(self, image: Image.Image, frame_id: int, ref_id: int):
+    def _diff_against(self, image: Image.Image, frame_id: int, ref_id: int, new_arr: np.ndarray):
         if self.auto_keyframe_sim > 0:
             ref_arr = self._ref_arrays[ref_id]
-            new_arr = np.array(image, dtype=np.int16)
             diff_arr = np.abs(new_arr - ref_arr).max(axis=2)
             total = ref_arr.shape[0] * ref_arr.shape[1]
             if (diff_arr <= self.threshold).sum() / total < self.auto_keyframe_sim:
@@ -415,12 +415,14 @@ class ImpakWriter:
             codec=self.codec,
             quality=self.quality,
             workers=self.workers,
+            ref_arr=self._ref_arrays[ref_id],
+            new_arr=new_arr,
         )
         return FRAME_DELTA, ref_id, patches
 
     def _encode_frame_lto(self, image: Image.Image, frame_id: int,
-                           same_size_ids: Optional[list] = None):
-        new_arr = np.array(image, dtype=np.int16)
+                          new_arr: np.ndarray,
+                          same_size_ids: Optional[list] = None):
         total_px = new_arr.shape[0] * new_arr.shape[1]
 
         if same_size_ids is None:
@@ -457,6 +459,8 @@ class ImpakWriter:
                 codec=self.codec,
                 quality=self.quality,
                 workers=1,
+                ref_arr=self._ref_arrays[cid],
+                new_arr=new_arr,
             )
             return cid, patches, sum(len(p[4]) for p in patches)
 
@@ -474,20 +478,11 @@ class ImpakWriter:
 
         return FRAME_DELTA, best_ref_id, best_patches
 
-    def _encode_frame_manual(self, image: Image.Image, frame_id: int):
+    def _encode_frame_manual(self, image: Image.Image, frame_id: int, new_arr: np.ndarray):
         """
         Manual-mode encoder: probe designated baseline frames first, then fall
         back to the configured fallback mode if no baseline wins.
-
-        Algorithm
-        ---------
-        1. Score all baselines by pixel similarity (numpy, cheap).
-        2. Probe the top-K baselines (full patch compression, parallel).
-        3. Compute the fallback result via _encode_frame_fallback().
-        4. Three-way size comparison: keyframe vs best-baseline vs fallback.
-           Return whichever is smallest.
         """
-        new_arr = np.array(image, dtype=np.int16)
         total_px = new_arr.shape[0] * new_arr.shape[1]
 
         def _score_baseline(bid: int):
@@ -512,6 +507,8 @@ class ImpakWriter:
                 codec=self.codec,
                 quality=self.quality,
                 workers=1,
+                ref_arr=self._ref_arrays[bid],
+                new_arr=new_arr,
             )
             return bid, patches, sum(len(p[4]) for p in patches)
 
@@ -522,7 +519,7 @@ class ImpakWriter:
 
         best_bl_ref, best_bl_patches, best_bl_size = min(baseline_results, key=lambda r: r[2])
 
-        fb_type, fb_ref_id, fb_patches = self._encode_frame_fallback(image, frame_id)
+        fb_type, fb_ref_id, fb_patches = self._encode_frame_fallback(image, frame_id, new_arr)
         fb_size = sum(len(p[4]) for p in fb_patches)
 
         iw, ih = image.size
@@ -534,35 +531,31 @@ class ImpakWriter:
             return FRAME_DELTA, best_bl_ref, best_bl_patches
         return fb_type, fb_ref_id, fb_patches
 
-    def _encode_frame_fallback(self, image: Image.Image, frame_id: int):
+    def _encode_frame_fallback(self, image: Image.Image, frame_id: int, new_arr: np.ndarray):
         """
         Run the configured fallback_mode for this frame.
-
-        content_id is the frame's index within the content-only sequence
-        (i.e. excluding the hidden baseline keyframes at the front).
-        This keeps keyframe_interval counting and vs_first anchoring correct.
         """
         content_id = frame_id - self._baseline_count
 
         if self.fallback_mode_id == MODE_VS_FIRST:
             if content_id == 0:
                 return self._make_keyframe(image, frame_id)
-            ref_id = self._baseline_count   # first content frame
-            return self._diff_against(image, frame_id, ref_id)
+            ref_id = self._baseline_count
+            return self._diff_against(image, frame_id, ref_id, new_arr)
 
         if self.fallback_mode_id == MODE_VS_PRIOR:
             if content_id == 0:
                 return self._make_keyframe(image, frame_id)
-            return self._diff_against(image, frame_id, frame_id - 1)
+            return self._diff_against(image, frame_id, frame_id - 1, new_arr)
 
         if self.fallback_mode_id == MODE_KEYFRAME:
             if content_id == 0 or (content_id % self.keyframe_interval == 0):
                 return self._make_keyframe(image, frame_id)
-            return self._diff_against(image, frame_id, frame_id - 1)
+            return self._diff_against(image, frame_id, frame_id - 1, new_arr)
 
         if self.fallback_mode_id == MODE_LTO:
             if content_id == 0:
                 return self._make_keyframe(image, frame_id)
-            return self._encode_frame_lto(image, frame_id)
+            return self._encode_frame_lto(image, frame_id, new_arr)
 
         return self._make_keyframe(image, frame_id)
