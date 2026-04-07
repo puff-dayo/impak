@@ -36,7 +36,7 @@ Run `impak --help`, or check documentations in `/docs` folder.
 
 ```commandline
 uv pip install build twine setuptools wheel
-uv run --active python -m build
+uv build
 twine check dist/*
 uv pip install dist/impak-xxxx.whl
 ```

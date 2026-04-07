@@ -76,8 +76,13 @@ def create(path, mode="lto", **kwargs) -> ImpakWriter:
     return ImpakWriter(path, mode=mode, **kwargs)
 
 
-def open(path, **kwargs) -> ImpakReader:
-    return ImpakReader(path, **kwargs)
+def open(path, low_ram_mode=False, cache_size=None, **kwargs) -> ImpakReader:
+    return ImpakReader(
+        path,
+        low_ram_mode=low_ram_mode,
+        cache_size=cache_size,
+        **kwargs,
+    )
 
 
 __all__ = [
@@ -90,4 +95,4 @@ __all__ = [
     "similarity_score",
 ]
 
-__version__ = "0.1.2"
+__version__ = "0.1.3"

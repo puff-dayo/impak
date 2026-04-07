@@ -24,7 +24,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Iterator, List, Union
+from typing import Iterator, List, Union, Optional
+from collections import OrderedDict
 
 from PIL import Image
 
@@ -57,14 +58,28 @@ class ImpakReader:
     delta frames that reference them.
     """
 
-    def __init__(self, path: Union[str, Path]):
+    def __init__(
+            self,
+            path: Union[str, Path],
+            low_ram_mode: bool = False,
+            cache_size: Optional[int] = None,
+    ):
         self.path = Path(path)
         self._fh = open(self.path, "rb")
         self._header: dict = {}
         self._index: list[dict] = []
-        self._name_map: dict[str, int] = {}   # name → content_id
+        self._name_map: dict[str, int] = {}  # name → content_id
         self._meta_cache: dict[int, dict] = {}
-        self._decode_cache: dict[int, Image.Image] = {}
+
+        self.low_ram_mode = low_ram_mode
+        if cache_size is None:
+            cache_size = 2 if low_ram_mode else 0
+        self.cache_size = max(0, cache_size)
+
+        # abs_id -> Image.Image
+        # normal mode: unlimited dict-like cache
+        # low_ram_mode: bounded LRU cache
+        self._decode_cache: "OrderedDict[int, Image.Image]" = OrderedDict()
 
         self._read_header()
         self._read_index()
@@ -108,6 +123,25 @@ class ImpakReader:
     def __iter__(self) -> Iterator[Image.Image]:
         for i in range(len(self)):
             yield self._decode_frame(self._content_to_abs(i))
+
+    def _cache_get(self, abs_id: int) -> Optional[Image.Image]:
+        img = self._decode_cache.get(abs_id)
+        if img is None:
+            return None
+        # LRU touch
+        self._decode_cache.move_to_end(abs_id)
+        return img.copy()
+
+    def _cache_put(self, abs_id: int, img: Image.Image) -> None:
+        if self.cache_size == 0:
+            return
+
+        self._decode_cache[abs_id] = img.copy()
+        self._decode_cache.move_to_end(abs_id)
+
+        if self.low_ram_mode:
+            while len(self._decode_cache) > self.cache_size:
+                self._decode_cache.popitem(last=False)
 
     def get_metadata(self, frame_id: int) -> dict:
         """
@@ -222,10 +256,18 @@ class ImpakReader:
         """Convert a public content index to an absolute frame index."""
         return content_id + self._baseline_count
 
-    def _decode_frame(self, abs_id: int) -> Image.Image:
+    def _decode_frame(self, abs_id: int, _memo: Optional[dict[int, Image.Image]] = None) -> Image.Image:
         """Decode frame by absolute index (works for baselines too)."""
-        if abs_id in self._decode_cache:
-            return self._decode_cache[abs_id].copy()
+        if _memo is None:
+            _memo = {}
+
+        if abs_id in _memo:
+            return _memo[abs_id].copy()
+
+        cached = self._cache_get(abs_id)
+        if cached is not None:
+            _memo[abs_id] = cached
+            return cached.copy()
 
         entry = self._index[abs_id]
         codec = self.codec
@@ -236,12 +278,13 @@ class ImpakReader:
             img = self._decompress_patch_to_image(patches[0][4], codec)
         else:
             ref_id = entry["ref_frame_id"]
-            ref_img = self._decode_frame(ref_id)
+            ref_img = self._decode_frame(ref_id, _memo=_memo)
             patches = self._read_patches(abs_id)
             img = reconstruct(ref_img, patches, codec=codec)
 
         img = img.convert("RGBA")
-        self._decode_cache[abs_id] = img
+        _memo[abs_id] = img
+        self._cache_put(abs_id, img)
         return img.copy()
 
     def _read_header(self):
@@ -342,13 +385,24 @@ class ImpakReader:
                 self._name_map[meta["name"]] = abs_id
 
     @classmethod
-    def load_all(cls, path: Union[str, Path]) -> List[Image.Image]:
+    def load_all(
+            cls,
+            path: Union[str, Path],
+            low_ram_mode: bool = False,
+            cache_size: Optional[int] = None,
+    ) -> List[Image.Image]:
         """Load every content frame and return as a list of PIL Images."""
-        with cls(path) as r:
+        with cls(path, low_ram_mode=low_ram_mode, cache_size=cache_size) as r:
             return list(r)
 
     @classmethod
-    def load_frame(cls, path: Union[str, Path], frame_id: int) -> Image.Image:
+    def load_frame(
+            cls,
+            path: Union[str, Path],
+            frame_id: int,
+            low_ram_mode: bool = False,
+            cache_size: Optional[int] = None,
+    ) -> Image.Image:
         """Load a single content frame by content index."""
-        with cls(path) as r:
+        with cls(path, low_ram_mode=low_ram_mode, cache_size=cache_size) as r:
             return r[frame_id]
