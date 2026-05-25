@@ -399,25 +399,37 @@ class ImpakWriter:
         compressed = _encode_crop(image, 0, 0, w, h, codec=self.codec, quality=self.quality)
         return FRAME_KEYFRAME, frame_id, [(0, 0, w, h, compressed)]
 
-    def _diff_against(self, image: Image.Image, frame_id: int, ref_id: int, new_arr: np.ndarray):
+    def _diff_against(
+            self,
+            image: Image.Image,
+            frame_id: int,
+            ref_id: int,
+            new_arr: np.ndarray,
+    ):
+        ref_arr = self._ref_arrays[ref_id]
+        diff_arr = None
+
         if self.auto_keyframe_sim > 0:
-            ref_arr = self._ref_arrays[ref_id]
             diff_arr = np.abs(new_arr - ref_arr).max(axis=2)
             total = ref_arr.shape[0] * ref_arr.shape[1]
+
             if (diff_arr <= self.threshold).sum() / total < self.auto_keyframe_sim:
                 return self._make_keyframe(image, frame_id)
 
         patches = compute_patches(
-            self._ref_images[ref_id], image,
+            self._ref_images[ref_id],
+            image,
             threshold=self.threshold,
             tile_size=self.tile_size,
             merge_gap=self.merge_gap,
             codec=self.codec,
             quality=self.quality,
             workers=self.workers,
-            ref_arr=self._ref_arrays[ref_id],
+            ref_arr=ref_arr,
             new_arr=new_arr,
+            diff_arr=diff_arr,
         )
+
         return FRAME_DELTA, ref_id, patches
 
     def _encode_frame_lto(self, image: Image.Image, frame_id: int,

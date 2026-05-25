@@ -82,6 +82,7 @@ def compute_patches(
     workers: Optional[int] = None,
     ref_arr: Optional[np.ndarray] = None,
     new_arr: Optional[np.ndarray] = None,
+    diff_arr: Optional[np.ndarray] = None,
 ) -> List[Patch]:
     """
     Compare *new_img* against *ref_img* using a tile grid.
@@ -118,7 +119,15 @@ def compute_patches(
         )
 
     h, w = ref.shape[:2]
-    diff = np.abs(new - ref).max(axis=2)
+
+    if diff_arr is None:
+        diff = np.abs(new - ref).max(axis=2)
+    else:
+        diff = diff_arr
+        if diff.shape != (h, w):
+            raise ValueError(
+                f"diff_arr dimensions differ: diff={diff.shape} expected={(h, w)}"
+            )
 
     cols = (w + tile_size - 1) // tile_size
     rows = (h + tile_size - 1) // tile_size
