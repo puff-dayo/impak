@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import io
 import zlib
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, Executor
 from typing import List, Optional, Tuple
 
 import numpy as np
@@ -83,6 +83,7 @@ def compute_patches(
     ref_arr: Optional[np.ndarray] = None,
     new_arr: Optional[np.ndarray] = None,
     diff_arr: Optional[np.ndarray] = None,
+    executor: Optional[Executor] = None,
 ) -> List[Patch]:
     """
     Compare *new_img* against *ref_img* using a tile grid.
@@ -156,16 +157,33 @@ def compute_patches(
 
     if len(merged) <= 2 or workers == 1:
         patches: List[Patch] = [
-            (rx, ry, rw, rh, _encode_crop(new_img, rx, ry, rw, rh, codec=codec, quality=quality))
+            (
+                rx,
+                ry,
+                rw,
+                rh,
+                _encode_crop(new_img, rx, ry, rw, rh, codec=codec, quality=quality),
+            )
             for (rx, ry, rw, rh) in merged
         ]
     else:
         def _compress_rect(rect: tuple) -> Patch:
             rx, ry, rw, rh = rect
-            return rx, ry, rw, rh, _encode_crop(new_img, rx, ry, rw, rh, codec=codec, quality=quality)
+            return rx, ry, rw, rh, _encode_crop(
+                new_img,
+                rx,
+                ry,
+                rw,
+                rh,
+                codec=codec,
+                quality=quality,
+            )
 
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            patches = list(pool.map(_compress_rect, merged))
+        if executor is not None:
+            patches = list(executor.map(_compress_rect, merged))
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                patches = list(pool.map(_compress_rect, merged))
 
     return patches
 

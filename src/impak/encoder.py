@@ -430,6 +430,7 @@ class ImpakWriter:
             ref_arr=ref_arr,
             new_arr=new_arr,
             diff_arr=diff_arr,
+            executor=self._pool,
         )
 
         return FRAME_DELTA, ref_id, patches
