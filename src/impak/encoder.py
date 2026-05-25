@@ -106,6 +106,7 @@ class ImpakWriter:
         workers: Optional[int] = None,
         baselines: Optional[List[Union[Image.Image, str, Path]]] = None,
         fallback_mode: str = "lto",
+        lto_fast_keyframe_probe: bool = True,
     ):
         if mode not in MODE_FROM_NAME:
             raise ValueError(f"mode must be one of {list(MODE_FROM_NAME)}")
@@ -144,6 +145,7 @@ class ImpakWriter:
         self.workers = workers
         self.fallback_mode = fallback_mode
         self.fallback_mode_id = MODE_FROM_NAME.get(fallback_mode, MODE_LTO)
+        self.lto_fast_keyframe_probe = lto_fast_keyframe_probe
 
         self._frames: list[dict] = []
         self._frame_data: list[bytes] = []
@@ -460,6 +462,14 @@ class ImpakWriter:
             scored = list(self._pool.map(_score, eligible))
 
         scored.sort(key=lambda x: -x[0])
+
+        if self.lto_fast_keyframe_probe and self.auto_keyframe_sim > 0 and scored:
+            best_sim = scored[0][0]
+            probe_threshold = self.auto_keyframe_sim * 0.95
+
+            if best_sim < probe_threshold:
+                return self._make_keyframe(image, frame_id)
+
         candidates = [cid for (_, cid) in scored[: self.lto_candidates]]
 
         def _probe(cid: int):
