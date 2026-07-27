@@ -681,8 +681,11 @@ class ImpakWriter:
         if not eligible:
             return self._make_keyframe(image, frame_id)
 
+        _diff_cache: dict[int, np.ndarray] = {}
+
         def _score(cid: int):
             diff = np.abs(new_arr - self._ref_arrays[cid]).max(axis=2)
+            _diff_cache[cid] = diff
             sim = float((diff <= self.threshold).sum()) / total_px
             return sim, cid
 
@@ -702,6 +705,7 @@ class ImpakWriter:
         candidates = [cid for (_, cid) in scored[: self.lto_candidates]]
 
         def _probe(cid: int):
+            diff_arr = _diff_cache.pop(cid)
             patches = compute_patches(
                 self._ref_images[cid], image,
                 threshold=self.threshold,
@@ -712,6 +716,7 @@ class ImpakWriter:
                 workers=1,
                 ref_arr=self._ref_arrays[cid],
                 new_arr=new_arr,
+                diff_arr=diff_arr,
             )
             return cid, patches, sum(len(p[4]) for p in patches)
 
@@ -736,8 +741,11 @@ class ImpakWriter:
         """
         total_px = new_arr.shape[0] * new_arr.shape[1]
 
+        _diff_cache: dict[int, np.ndarray] = {}
+
         def _score_baseline(bid: int):
             diff = np.abs(new_arr - self._ref_arrays[bid]).max(axis=2)
+            _diff_cache[bid] = diff
             sim = float((diff <= self.threshold).sum()) / total_px
             return sim, bid
 
@@ -750,6 +758,7 @@ class ImpakWriter:
         top_baselines = [bid for (_, bid) in scored[: self.lto_candidates]]
 
         def _probe_baseline(bid: int):
+            diff_arr = _diff_cache.pop(bid)
             patches = compute_patches(
                 self._ref_images[bid], image,
                 threshold=self.threshold,
@@ -760,6 +769,7 @@ class ImpakWriter:
                 workers=1,
                 ref_arr=self._ref_arrays[bid],
                 new_arr=new_arr,
+                diff_arr=diff_arr,
             )
             return bid, patches, sum(len(p[4]) for p in patches)
 
