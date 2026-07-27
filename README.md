@@ -24,11 +24,17 @@ import impak
 from pathlib import Path
 
 paths = sorted(Path("frames/").glob("*.png"))
+names = [p.stem for p in paths]
 
-# Encode
+# Encode serial — all modes
 with impak.create("out.impak", mode="vs_first", codec="webp", quality=100) as w:
     for p in paths:
         w.add(p, name=p.stem)
+
+# Encode parallel — vs_first only
+with impak.create("out.impak", mode="vs_first", codec="webp", quality=100) as w:
+    w.add(paths[0], name=names[0])            # first frame (as keyframe)
+    w.add_batch(paths[1:], names=names[1:])   # rest encoded in parallel
 
 # Decode
 with impak.open("out.impak") as r:

@@ -35,7 +35,7 @@ import json
 import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import List, Optional, Sequence, Union
 
 import numpy as np
 from PIL import Image
@@ -57,6 +57,56 @@ from .formats import (
     pack_index_entry,
     pack_patch_header,
 )
+
+
+def _encode_vs_first_worker(ref_img, ref_arr, new_img, new_arr, params):
+    """Process pool worker: encode one frame against ref 0.
+
+    Returns dict with frame_type, ref_frame_id, patches.
+    Uses workers=1 inside compute_patches.
+    """
+    threshold = params["threshold"]
+    tile_size = params["tile_size"]
+    merge_gap = params["merge_gap"]
+    codec = params["codec"]
+    quality = params["quality"]
+    auto_keyframe_sim = params["auto_keyframe_sim"]
+
+    diff_arr = None
+    force_kf = False
+    if auto_keyframe_sim > 0:
+        diff_arr = np.abs(new_arr - ref_arr).max(axis=2)
+        total = ref_arr.shape[0] * ref_arr.shape[1]
+        if (diff_arr <= threshold).sum() / total < auto_keyframe_sim:
+            force_kf = True
+
+    if force_kf:
+        w, h = new_img.size
+        data = _encode_crop(new_img, 0, 0, w, h, codec=codec, quality=quality)
+        return {
+            "frame_type": FRAME_KEYFRAME,
+            "ref_frame_id": 0,
+            "patches": [(0, 0, w, h, data)],
+        }
+
+    patches = compute_patches(
+        ref_img, new_img,
+        threshold=threshold,
+        tile_size=tile_size,
+        merge_gap=merge_gap,
+        codec=codec,
+        quality=quality,
+        workers=1,
+        ref_arr=ref_arr,
+        new_arr=new_arr,
+        diff_arr=diff_arr,
+    )
+
+    return {
+        "frame_type": FRAME_DELTA,
+        "ref_frame_id": 0,
+        "patches": patches,
+    }
 
 
 class ImpakWriter:
@@ -91,23 +141,23 @@ class ImpakWriter:
     """
 
     def __init__(
-        self,
-        path: Union[str, Path],
-        mode: str = "vs_first",
-        keyframe_interval: int = 10,
-        threshold: int = 4,
-        tile_size: int = 64,
-        merge_gap: int = 8,
-        auto_keyframe_sim: float = 0.5,
-        codec: str = "webp",
-        quality: int = 100,
-        lto_candidates: int = 6,
-        max_ref_depth: int = 8,
-        workers: Optional[int] = None,
-        baselines: Optional[List[Union[Image.Image, str, Path]]] = None,
-        fallback_mode: str = "lto",
-        lto_fast_keyframe_probe: bool = True,
-        lto_fast_probe_sim: float = 0.5,
+            self,
+            path: Union[str, Path],
+            mode: str = "vs_first",
+            keyframe_interval: int = 10,
+            threshold: int = 4,
+            tile_size: int = 64,
+            merge_gap: int = 8,
+            auto_keyframe_sim: float = 0.5,
+            codec: str = "webp",
+            quality: int = 100,
+            lto_candidates: int = 6,
+            max_ref_depth: int = 8,
+            workers: Optional[int] = None,
+            baselines: Optional[List[Union[Image.Image, str, Path]]] = None,
+            fallback_mode: str = "lto",
+            lto_fast_keyframe_probe: bool = True,
+            lto_fast_probe_sim: float = 0.5,
     ):
         if mode not in MODE_FROM_NAME:
             raise ValueError(f"mode must be one of {list(MODE_FROM_NAME)}")
@@ -155,7 +205,6 @@ class ImpakWriter:
         self._ref_arrays: list[np.ndarray] = []
         self._depths: list[int] = []
 
-
         self._canvas: Optional[tuple[int, int]] = None
         self._size_groups: dict[tuple[int, int], list[int]] = {}
         self._closed = False
@@ -168,10 +217,10 @@ class ImpakWriter:
         self._pool = ThreadPoolExecutor(max_workers=max(1, _pool_size))
 
     def add(
-        self,
-        image: Union[Image.Image, str, Path],
-        name: Optional[str] = None,
-        metadata: Optional[dict] = None,
+            self,
+            image: Union[Image.Image, str, Path],
+            name: Optional[str] = None,
+            metadata: Optional[dict] = None,
     ) -> int:
         """
         Add one content image to the collection.  Returns the 0-based frame
@@ -235,6 +284,143 @@ class ImpakWriter:
         self._size_groups.setdefault(size_key, []).append(frame_id)
 
         return frame_id - self._baseline_count
+
+    def add_batch(
+            self,
+            images: Sequence[Union[Image.Image, str, Path]],
+            names: Optional[Sequence[Optional[str]]] = None,
+            metadatas: Optional[Sequence[Optional[dict]]] = None,
+            workers: Optional[int] = None,
+    ) -> list[int]:
+        """
+        Add multiple images in parallel (vs_first mode only).
+
+        For ``vs_first`` mode all frames after the first are encoded against
+        frame 0 using a process pool — significantly faster on multi-core
+        hardware.  Other modes fall back to serial :meth:`add`.
+
+        Parameters
+        ----------
+        images    : iterable of PIL Images or file paths
+        names     : optional per-frame name (parallel to *images*)
+        metadatas : optional per-frame metadata dicts
+        workers   : process pool size (default: *os.cpu_count()*)
+
+        Returns
+        -------
+        list[int] – content frame indices (same order as *images*)
+        """
+        if self._closed:
+            raise RuntimeError("Writer is already closed")
+
+        if self._pending_baselines:
+            self._inject_baselines(self._pending_baselines)
+            self._pending_baselines = []
+
+        images = list(images)
+        if not images:
+            return []
+
+        # ── vs_first with ref 0 → parallel ──────────────────────────
+        if self.mode_id == MODE_VS_FIRST and len(self._frames) > 0:
+            return self._add_batch_parallel(
+                images, names, metadatas, workers,
+            )
+
+        # ── fallback: serial add() ───────────────────────────────────
+        return [
+            self.add(
+                images[i],
+                name=names[i] if names and i < len(names) else None,
+                metadata=metadatas[i] if metadatas and i < len(metadatas) else None,
+            )
+            for i in range(len(images))
+        ]
+
+    def _add_batch_parallel(
+            self,
+            images: list,
+            names: Optional[Sequence[Optional[str]]],
+            metadatas: Optional[Sequence[Optional[dict]]],
+            workers: Optional[int],
+    ) -> list[int]:
+        """Encode all images in parallel against ref 0 (ProcessPoolExecutor)."""
+        from concurrent.futures import ProcessPoolExecutor
+
+        # Preprocess: convert all to RGBA + arrays
+        preprocessed: list[tuple] = []
+        for img in images:
+            if isinstance(img, (str, Path)):
+                img = Image.open(img)
+            img = img.convert("RGBA")
+            arr = np.array(img, dtype=np.int16)
+            preprocessed.append((img, arr))
+
+        if self._canvas is None and preprocessed:
+            self._canvas = (preprocessed[0][0].width, preprocessed[0][0].height)
+
+        ref_img = self._ref_images[0]
+        ref_arr = self._ref_arrays[0]
+
+        params = {
+            k: getattr(self, k)
+            for k in ("threshold", "tile_size", "merge_gap", "codec", "quality",
+                      "auto_keyframe_sim")
+        }
+
+        n_workers = workers if workers is not None else (os.cpu_count() or 4)
+        result_ids: list[int] = []
+
+        with ProcessPoolExecutor(max_workers=n_workers) as pool:
+            futures = [
+                pool.submit(_encode_vs_first_worker, ref_img, ref_arr, img, arr, params)
+                for img, arr in preprocessed
+            ]
+
+            for i, future in enumerate(futures):
+                result = future.result()
+                img, arr = preprocessed[i]
+                frame_type = result["frame_type"]
+                ref_id = result["ref_frame_id"]
+                patches = result["patches"]
+                frame_id = len(self._frames)
+
+                meta: dict = {}
+                if names and i < len(names) and names[i]:
+                    meta["name"] = names[i]
+                if metadatas and i < len(metadatas) and metadatas[i]:
+                    meta.update(metadatas[i])
+                meta["_size"] = [img.width, img.height]
+                meta_bytes = json.dumps(meta, separators=(",", ":")).encode() if meta else b""
+
+                parts: list[bytes] = []
+                for (x, y, w, h, data) in patches:
+                    parts.append(pack_patch_header(x, y, w, h, len(data)))
+                    parts.append(data)
+                parts.append(meta_bytes)
+                frame_bytes = b"".join(parts)
+
+                if frame_type == FRAME_KEYFRAME:
+                    ref_id = frame_id
+                    self._depths.append(0)
+                else:
+                    self._depths.append(self._depths[ref_id] + 1)
+
+                self._frames.append({
+                    "patch_count": len(patches),
+                    "ref_frame_id": ref_id,
+                    "metadata_len": len(meta_bytes),
+                    "frame_type": frame_type,
+                })
+                self._frame_data.append(frame_bytes)
+                self._ref_images.append(img)
+                self._ref_arrays.append(arr)
+                size_key = (img.width, img.height)
+                self._size_groups.setdefault(size_key, []).append(frame_id)
+
+                result_ids.append(frame_id - self._baseline_count)
+
+        return result_ids
 
     def close(self):
         """Finalise and write the file.  Called automatically by __exit__."""
