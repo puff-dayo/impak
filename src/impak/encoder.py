@@ -72,10 +72,9 @@ def _encode_vs_first_worker(ref_img, ref_arr, new_img, new_arr, params):
     quality = params["quality"]
     auto_keyframe_sim = params["auto_keyframe_sim"]
 
-    diff_arr = None
+    diff_arr = np.abs(new_arr - ref_arr).max(axis=2)
     force_kf = False
     if auto_keyframe_sim > 0:
-        diff_arr = np.abs(new_arr - ref_arr).max(axis=2)
         total = ref_arr.shape[0] * ref_arr.shape[1]
         if (diff_arr <= threshold).sum() / total < auto_keyframe_sim:
             force_kf = True
@@ -597,12 +596,10 @@ class ImpakWriter:
             new_arr: np.ndarray,
     ):
         ref_arr = self._ref_arrays[ref_id]
-        diff_arr = None
+        diff_arr = np.abs(new_arr - ref_arr).max(axis=2)
 
         if self.auto_keyframe_sim > 0:
-            diff_arr = np.abs(new_arr - ref_arr).max(axis=2)
             total = ref_arr.shape[0] * ref_arr.shape[1]
-
             if (diff_arr <= self.threshold).sum() / total < self.auto_keyframe_sim:
                 return self._make_keyframe(image, frame_id)
 
