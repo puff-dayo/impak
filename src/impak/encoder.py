@@ -59,53 +59,81 @@ from .formats import (
 )
 
 
-def _encode_vs_first_worker(ref_img, ref_arr, new_img, new_arr, params):
-    """Process pool worker: encode one frame against ref 0.
-
-    Returns dict with frame_type, ref_frame_id, patches.
-    Uses workers=1 inside compute_patches.
+def _store_in_shm(arr):
+    """Copy a numpy array into shared memory.  Returns (shm, metadata tuple).
+    The caller must close() and unlink() the returned object when done.
     """
-    threshold = params["threshold"]
-    tile_size = params["tile_size"]
-    merge_gap = params["merge_gap"]
-    codec = params["codec"]
-    quality = params["quality"]
-    auto_keyframe_sim = params["auto_keyframe_sim"]
+    from multiprocessing import shared_memory
+    arr = np.ascontiguousarray(arr)
+    shm = shared_memory.SharedMemory(create=True, size=arr.nbytes)
+    buf = np.ndarray(arr.shape, dtype=arr.dtype, buffer=shm.buf)
+    buf[:] = arr[:]
+    return shm, (shm.name, arr.shape, arr.dtype)
 
-    diff_arr = np.abs(new_arr - ref_arr).max(axis=2)
-    force_kf = False
-    if auto_keyframe_sim > 0:
-        total = ref_arr.shape[0] * ref_arr.shape[1]
-        if (diff_arr <= threshold).sum() / total < auto_keyframe_sim:
-            force_kf = True
 
-    if force_kf:
-        w, h = new_img.size
-        data = _encode_crop(new_img, 0, 0, w, h, codec=codec, quality=quality)
+def _encode_vs_first_worker(ref_meta, new_meta, params):
+    from multiprocessing import shared_memory
+
+    import numpy as np
+    from PIL import Image
+
+    ref_name, ref_shape, ref_dtype = ref_meta
+    new_name, new_shape, new_dtype = new_meta
+
+    ref_shm = shared_memory.SharedMemory(name=ref_name)
+    ref_arr = np.ndarray(ref_shape, dtype=ref_dtype, buffer=ref_shm.buf)
+
+    new_shm = shared_memory.SharedMemory(name=new_name)
+    new_arr = np.ndarray(new_shape, dtype=new_dtype, buffer=new_shm.buf)
+
+    try:
+        threshold = params["threshold"]
+        tile_size = params["tile_size"]
+        merge_gap = params["merge_gap"]
+        codec = params["codec"]
+        quality = params["quality"]
+        auto_keyframe_sim = params["auto_keyframe_sim"]
+
+        new_img = Image.fromarray(new_arr.astype(np.uint8), "RGBA")
+
+        diff_arr = np.abs(new_arr - ref_arr).max(axis=2)
+        force_kf = False
+        if auto_keyframe_sim > 0:
+            total = ref_arr.shape[0] * ref_arr.shape[1]
+            if (diff_arr <= threshold).sum() / total < auto_keyframe_sim:
+                force_kf = True
+
+        if force_kf:
+            w = new_arr.shape[1]
+            h = new_arr.shape[0]
+            data = _encode_crop(new_img, 0, 0, w, h, codec=codec, quality=quality)
+            return {
+                "frame_type": FRAME_KEYFRAME,
+                "ref_frame_id": 0,
+                "patches": [(0, 0, w, h, data)],
+            }
+
+        patches = compute_patches(
+            None, new_img,
+            threshold=threshold,
+            tile_size=tile_size,
+            merge_gap=merge_gap,
+            codec=codec,
+            quality=quality,
+            workers=1,
+            ref_arr=ref_arr,
+            new_arr=new_arr,
+            diff_arr=diff_arr,
+        )
+
         return {
-            "frame_type": FRAME_KEYFRAME,
+            "frame_type": FRAME_DELTA,
             "ref_frame_id": 0,
-            "patches": [(0, 0, w, h, data)],
+            "patches": patches,
         }
-
-    patches = compute_patches(
-        ref_img, new_img,
-        threshold=threshold,
-        tile_size=tile_size,
-        merge_gap=merge_gap,
-        codec=codec,
-        quality=quality,
-        workers=1,
-        ref_arr=ref_arr,
-        new_arr=new_arr,
-        diff_arr=diff_arr,
-    )
-
-    return {
-        "frame_type": FRAME_DELTA,
-        "ref_frame_id": 0,
-        "patches": patches,
-    }
+    finally:
+        new_shm.close()
+        ref_shm.close()
 
 
 class ImpakWriter:
@@ -343,7 +371,8 @@ class ImpakWriter:
             metadatas: Optional[Sequence[Optional[dict]]],
             workers: Optional[int],
     ) -> list[int]:
-        """Encode all images in parallel against ref 0 (ProcessPoolExecutor)."""
+        """Encode all images in parallel against ref 0.
+        """
         from concurrent.futures import ProcessPoolExecutor
 
         # Preprocess: convert all to RGBA + arrays
@@ -358,8 +387,8 @@ class ImpakWriter:
         if self._canvas is None and preprocessed:
             self._canvas = (preprocessed[0][0].width, preprocessed[0][0].height)
 
-        ref_img = self._ref_images[0]
         ref_arr = self._ref_arrays[0]
+        ref_shm, ref_meta = _store_in_shm(ref_arr)
 
         params = {
             k: getattr(self, k)
@@ -370,54 +399,69 @@ class ImpakWriter:
         n_workers = workers if workers is not None else (os.cpu_count() or 4)
         result_ids: list[int] = []
 
-        with ProcessPoolExecutor(max_workers=n_workers) as pool:
-            futures = [
-                pool.submit(_encode_vs_first_worker, ref_img, ref_arr, img, arr, params)
-                for img, arr in preprocessed
-            ]
+        new_shms: list = []
+        try:
+            with ProcessPoolExecutor(max_workers=n_workers) as pool:
+                futures = []
+                for img, arr in preprocessed:
+                    new_shm, new_meta = _store_in_shm(arr)
+                    new_shms.append(new_shm)
+                    futures.append(pool.submit(
+                        _encode_vs_first_worker,
+                        ref_meta, new_meta, params,
+                    ))
 
-            for i, future in enumerate(futures):
-                result = future.result()
-                img, arr = preprocessed[i]
-                frame_type = result["frame_type"]
-                ref_id = result["ref_frame_id"]
-                patches = result["patches"]
-                frame_id = len(self._frames)
+                for i, future in enumerate(futures):
+                    result = future.result()
+                    img, arr = preprocessed[i]
+                    frame_type = result["frame_type"]
+                    ref_id = result["ref_frame_id"]
+                    patches = result["patches"]
+                    frame_id = len(self._frames)
 
-                meta: dict = {}
-                if names and i < len(names) and names[i]:
-                    meta["name"] = names[i]
-                if metadatas and i < len(metadatas) and metadatas[i]:
-                    meta.update(metadatas[i])
-                meta["_size"] = [img.width, img.height]
-                meta_bytes = json.dumps(meta, separators=(",", ":")).encode() if meta else b""
+                    meta: dict = {}
+                    if names and i < len(names) and names[i]:
+                        meta["name"] = names[i]
+                    if metadatas and i < len(metadatas) and metadatas[i]:
+                        meta.update(metadatas[i])
+                    meta["_size"] = [img.width, img.height]
+                    meta_bytes = json.dumps(meta, separators=(",", ":")).encode() if meta else b""
 
-                parts: list[bytes] = []
-                for (x, y, w, h, data) in patches:
-                    parts.append(pack_patch_header(x, y, w, h, len(data)))
-                    parts.append(data)
-                parts.append(meta_bytes)
-                frame_bytes = b"".join(parts)
+                    parts: list[bytes] = []
+                    for (x, y, w, h, data) in patches:
+                        parts.append(pack_patch_header(x, y, w, h, len(data)))
+                        parts.append(data)
+                    parts.append(meta_bytes)
+                    frame_bytes = b"".join(parts)
 
-                if frame_type == FRAME_KEYFRAME:
-                    ref_id = frame_id
-                    self._depths.append(0)
-                else:
-                    self._depths.append(self._depths[ref_id] + 1)
+                    if frame_type == FRAME_KEYFRAME:
+                        ref_id = frame_id
+                        self._depths.append(0)
+                    else:
+                        self._depths.append(self._depths[ref_id] + 1)
 
-                self._frames.append({
-                    "patch_count": len(patches),
-                    "ref_frame_id": ref_id,
-                    "metadata_len": len(meta_bytes),
-                    "frame_type": frame_type,
-                })
-                self._frame_data.append(frame_bytes)
-                self._ref_images.append(img)
-                self._ref_arrays.append(arr)
-                size_key = (img.width, img.height)
-                self._size_groups.setdefault(size_key, []).append(frame_id)
+                    self._frames.append({
+                        "patch_count": len(patches),
+                        "ref_frame_id": ref_id,
+                        "metadata_len": len(meta_bytes),
+                        "frame_type": frame_type,
+                    })
+                    self._frame_data.append(frame_bytes)
+                    self._ref_images.append(img)
+                    self._ref_arrays.append(arr)
+                    size_key = (img.width, img.height)
+                    self._size_groups.setdefault(size_key, []).append(frame_id)
 
-                result_ids.append(frame_id - self._baseline_count)
+                    result_ids.append(frame_id - self._baseline_count)
+        finally:
+            for shm in new_shms:
+                try:
+                    shm.close()
+                    shm.unlink()
+                except Exception:
+                    pass
+            ref_shm.close()
+            ref_shm.unlink()
 
         return result_ids
 
