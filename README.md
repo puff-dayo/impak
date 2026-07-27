@@ -2,40 +2,49 @@
 
 Space-efficient patch-based image collection format.
 
-This is the full function package for `impak`, providing encoding, decoding, and API/CLI usage. For a lightweight decoder-only Python package, see [impak-decoder](https://github.com/puff-dayo/impak-app/tree/main/impak-decoder).
+## Install
+
+`impak` is available from [PyPI](https://pypi.org/project/impak/).
+
+```commandline
+pip install impak               # decoder only (Pillow)
+pip install impak[encoder]      # + numpy – encoding support (ImpakWriter)
+pip install impak[cli]          # + click – CLI tool (impak pack/unpack/info)
+pip install impak[all]          # both encoder and CLI
+```
+
+The base installation is decoder-only — `impak.open()`, `ImpakReader`, and `reconstruct` work with only `Pillow` as a dependency. No `numpy` or `click` needed.
 
 ## Example
 
-See [example.py](./example.py) for more example.
+See [example.py](./example.py) for more.
 
 ```python
-# A slightly slow, automatic method. The default method.
-# Possibly produces a smallest impak file, but it really depends.
-with impak.create("Ganyu X Slime_lto.impak",
-                  mode="lto", codec="webp", quality=95
-                  ) as pack:
-    for path in tqdm(paths, desc="Encoding using impak"):
-        pack.add(path, name=path.stem)
+import impak
+from pathlib import Path
 
-# A fast and straight forward, automatic method.
-# Results in a slightly larger impak file.
-with impak.create("Ganyu X Slime_prior.impak",
-                  mode="vs_prior", codec="webp", quality=95
-                  ) as pack:
-    for path in tqdm(paths, desc="Encoding using impak"):
-        pack.add(path, name=path.stem)
+paths = sorted(Path("frames/").glob("*.png"))
+
+# Encode
+with impak.create("out.impak", mode="vs_first", codec="webp", quality=100) as w:
+    for p in paths:
+        w.add(p, name=p.stem)
+
+# Decode
+with impak.open("out.impak") as r:
+    print(r.info())
+    img = r[0]
+    img = r["frame_01"]
+    for img in r:
+        img.show()
 ```
 
-## Usage
-
-Package `impak` is available from [pypi](https://pypi.org/project/impak/) using pip.
-
-Run `impak --help`, or check documentations in `/docs` folder.
+Run `impak --help`, or check documentation in the `/docs` folder.
 
 ## Build
 
 ```commandline
-uv pip install build twine setuptools wheel
+uv pip install build twine setuptools wheel / uv sync --all-extras
 uv build
 twine check dist/*
 uv pip install dist/impak-xxxx.whl

@@ -43,12 +43,19 @@ Diff modes
 
 """
 
-from .encoder import ImpakWriter
 from .decoder import ImpakReader
-from .differ import compute_patches, reconstruct, similarity_score
+from .differ import reconstruct
+
+try:
+    from .encoder import ImpakWriter
+    from .differ import compute_patches, similarity_score
+except ImportError:
+    ImpakWriter = None  # type: ignore
+    compute_patches = None  # type: ignore
+    similarity_score = None  # type: ignore
 
 
-def create(path, mode="lto", **kwargs) -> ImpakWriter:
+def create(path, mode="lto", **kwargs) -> "ImpakWriter":
     """
     Parameters
     ----------
@@ -73,6 +80,10 @@ def create(path, mode="lto", **kwargs) -> ImpakWriter:
                         one of "vs_first", "vs_prior", "keyframe", "lto"
                         (default "vs_prior")
     """
+    if ImpakWriter is None:
+        raise ImportError(
+            "Encoding requires the 'encoder' extra: pip install impak[encoder]"
+        )
     return ImpakWriter(path, mode=mode, **kwargs)
 
 
@@ -86,13 +97,11 @@ def open(path, low_ram_mode=False, cache_size=None, **kwargs) -> ImpakReader:
 
 
 __all__ = [
-    "create",
     "open",
-    "ImpakWriter",
     "ImpakReader",
-    "compute_patches",
     "reconstruct",
-    "similarity_score",
 ]
+if ImpakWriter is not None:
+    __all__ += ["create", "ImpakWriter", "compute_patches", "similarity_score"]
 
-__version__ = "0.2.0"
+__version__ = "1.0.0"

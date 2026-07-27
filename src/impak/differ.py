@@ -13,14 +13,18 @@ from __future__ import annotations
 
 import io
 import zlib
-from concurrent.futures import ThreadPoolExecutor, Executor
-from typing import List, Optional, Tuple
+from concurrent.futures import ThreadPoolExecutor
+from typing import TYPE_CHECKING, List, Optional, Tuple
 
-import numpy as np
 from PIL import Image
+
+if TYPE_CHECKING:
+    import numpy as np
+    from concurrent.futures import Executor
 
 # (x, y, w, h, compressed_pixel_data)
 Patch = Tuple[int, int, int, int, bytes]
+
 
 def _compress(raw_bytes: bytes) -> bytes:
     """zlib level-6 — used only to wrap PNG blobs."""
@@ -32,13 +36,13 @@ def _decompress(data: bytes) -> bytes:
 
 
 def _encode_crop(
-    img: Image.Image,
-    x: int,
-    y: int,
-    w: int,
-    h: int,
-    codec: str = "png",
-    quality: int = 100,
+        img: Image.Image,
+        x: int,
+        y: int,
+        w: int,
+        h: int,
+        codec: str = "png",
+        quality: int = 100,
 ) -> bytes:
     """
     Crop *img* at (x, y, w, h) and return compressed bytes ready to store.
@@ -56,7 +60,7 @@ def _encode_crop(
             crop.save(buf, format="WEBP", lossless=True)
         else:
             crop.save(buf, format="WEBP", lossless=False, quality=quality, method=4)
-        return buf.getvalue()          # WebP is self-compressed; no extra zlib
+        return buf.getvalue()  # WebP is self-compressed; no extra zlib
     else:
         crop.save(buf, format="PNG", compress_level=1)
         return _compress(buf.getvalue())
@@ -72,18 +76,18 @@ def _decode_patch(data: bytes, codec: str = "png") -> Image.Image:
 
 
 def compute_patches(
-    ref_img: Image.Image,
-    new_img: Image.Image,
-    threshold: int = 4,
-    tile_size: int = 32,
-    merge_gap: int = 8,
-    codec: str = "png",
-    quality: int = 100,
-    workers: Optional[int] = None,
-    ref_arr: Optional[np.ndarray] = None,
-    new_arr: Optional[np.ndarray] = None,
-    diff_arr: Optional[np.ndarray] = None,
-    executor: Optional[Executor] = None,
+        ref_img: Image.Image,
+        new_img: Image.Image,
+        threshold: int = 4,
+        tile_size: int = 32,
+        merge_gap: int = 8,
+        codec: str = "png",
+        quality: int = 100,
+        workers: Optional[int] = None,
+        ref_arr: Optional[np.ndarray] = None,
+        new_arr: Optional[np.ndarray] = None,
+        diff_arr: Optional[np.ndarray] = None,
+        executor: Optional[Executor] = None,
 ) -> List[Patch]:
     """
     Compare *new_img* against *ref_img* using a tile grid.
@@ -100,6 +104,8 @@ def compute_patches(
                  Set to 1 to disable parallelism entirely.
 
     """
+    import numpy as np
+
     if ref_arr is None:
         ref = np.array(ref_img.convert("RGBA"), dtype=np.int16)
     else:
@@ -186,6 +192,7 @@ def compute_patches(
                 patches = list(pool.map(_compress_rect, merged))
 
     return patches
+
 
 def _tiles_to_rects(tiles, tile_size, img_w, img_h):
     """Convert (tile_row, tile_col) list to pixel (x, y, w, h) tuples."""
@@ -274,6 +281,7 @@ def reconstruct(base_img: Image.Image, patches: List[Patch], codec: str = "png")
 
 def images_are_identical(img_a: Image.Image, img_b: Image.Image, threshold: int = 0) -> bool:
     """Quick check – True if max per-pixel delta ≤ threshold."""
+    import numpy as np
     a = np.array(img_a.convert("RGBA"), dtype=np.int16)
     b = np.array(img_b.convert("RGBA"), dtype=np.int16)
     if a.shape != b.shape:
@@ -286,6 +294,7 @@ def similarity_score(img_a: Image.Image, img_b: Image.Image) -> float:
     Return fraction of pixels that are identical (0.0 = completely different,
     1.0 = identical).  Useful for deciding whether to force a keyframe.
     """
+    import numpy as np
     a = np.array(img_a.convert("RGBA"), dtype=np.int16)
     b = np.array(img_b.convert("RGBA"), dtype=np.int16)
     if a.shape != b.shape:
