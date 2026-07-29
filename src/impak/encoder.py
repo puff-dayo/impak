@@ -681,6 +681,13 @@ class ImpakWriter:
         if not eligible:
             return self._make_keyframe(image, frame_id)
 
+        def _encode_keyframe():
+            iw, ih = image.size
+            kf_data = _encode_crop(image, 0, 0, iw, ih, codec=self.codec, quality=self.quality)
+            return FRAME_KEYFRAME, frame_id, [(0, 0, iw, ih, kf_data)], len(kf_data)
+
+        kf_future = self._pool.submit(_encode_keyframe)
+
         _diff_cache: dict[int, np.ndarray] = {}
 
         def _score(cid: int):
@@ -689,18 +696,14 @@ class ImpakWriter:
             sim = float((diff <= self.threshold).sum()) / total_px
             return sim, cid
 
-        if len(eligible) <= 2 or self.workers == 1:
-            scored = [_score(cid) for cid in eligible]
-        else:
-            scored = list(self._pool.map(_score, eligible))
+        scored = list(self._pool.map(_score, eligible))
 
         scored.sort(key=lambda x: -x[0])
 
         if self.lto_fast_keyframe_probe and scored:
             best_sim = scored[0][0]
-
             if best_sim < self.lto_fast_probe_sim:
-                return self._make_keyframe(image, frame_id)
+                return kf_future.result()[:3]
 
         candidates = [cid for (_, cid) in scored[: self.lto_candidates]]
 
@@ -718,21 +721,16 @@ class ImpakWriter:
                 new_arr=new_arr,
                 diff_arr=diff_arr,
             )
-            return cid, patches, sum(len(p[4]) for p in patches)
+            return FRAME_DELTA, cid, patches, sum(len(p[4]) for p in patches)
 
-        if len(candidates) <= 1 or self.workers == 1:
-            results = [_probe(cid) for cid in candidates]
-        else:
-            results = list(self._pool.map(_probe, candidates))
+        probe_futures = [self._pool.submit(_probe, cid) for cid in candidates]
+        kf_result = kf_future.result()
+        probe_results = [f.result() for f in probe_futures]
 
-        best_ref_id, best_patches, best_size = min(results, key=lambda r: r[2])
+        all_results = probe_results + [kf_result]
+        best_type, best_ref_id, best_patches, _ = min(all_results, key=lambda r: r[3])
 
-        iw, ih = image.size
-        kf_data = _encode_crop(image, 0, 0, iw, ih, codec=self.codec, quality=self.quality)
-        if len(kf_data) <= best_size:
-            return self._make_keyframe(image, frame_id)
-
-        return FRAME_DELTA, best_ref_id, best_patches
+        return best_type, best_ref_id, best_patches
 
     def _encode_frame_manual(self, image: Image.Image, frame_id: int, new_arr: np.ndarray):
         """
