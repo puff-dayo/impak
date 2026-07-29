@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "impak"
-version = "1.0.0"
+version = "1.0.1"
 description = "Space-efficient patch-based image collection format"
 readme = "README.md"
 license = "AGPL-3.0-or-later"
@@ -18,10 +18,12 @@ dependencies = [
 encoder = ["numpy>=1.24"]
 cli = ["click>=8.0"]
 dev = ["pdoc>=16", "twine>=6", "build>=1", "tqdm>=4"]
-all = ["impak[encoder,cli,dev]"]
+gui = ["PySide6>=6.8.0,<6.9.0"]
+all = ["impak[encoder,cli,dev,gui]"]
 
 [project.scripts]
 impak = "impak.cli:cli"
+impakgui = "impak.gui:main"
 
 [project.urls]
 Homepage = "https://puff-dayo.github.io/impak/impak.html"

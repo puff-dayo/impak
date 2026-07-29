@@ -10,7 +10,8 @@ Space-efficient patch-based image collection format.
 pip install impak               # decoder only (Pillow)
 pip install impak[encoder]      # + numpy – encoding support (ImpakWriter)
 pip install impak[cli]          # + click – CLI tool (impak pack/unpack/info)
-pip install impak[all]          # both encoder and CLI
+pip install impak[gui]          # + PySide6 – GUI toolbox (impakgui)
+pip install impak[all]          # both encoder, GUI and CLI
 ```
 
 The base installation is decoder-only — `impak.open()`, `ImpakReader`, and `reconstruct` work with only `Pillow` as a dependency. No `numpy` or `click` needed.
